@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip show *)",
+      "Bash(python -m pytest tests/test_connection.py -q --tb=short)",
+      "Bash(pip install *)",
+      "Bash(python -m pytest tests/test_schema.py -q --tb=short)",
+      "Bash(python -m pytest tests/test_diagnostics.py -q --tb=short)",
+      "Bash(python -m pytest tests/test_ui.py -q --tb=line)",
+      "Bash(python -m pytest tests/test_ui.py -q --tb=short)",
+      "Bash(python -m pytest -q --tb=short)"
+    ]
+  }
+}
