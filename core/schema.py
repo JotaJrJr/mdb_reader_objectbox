@@ -1,7 +1,7 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List
 
-from core.connection import MDBConnection
+from core.connection import MDBConnection, _AdobConnection
 
 
 @dataclass
@@ -32,7 +32,10 @@ class SchemaReader:
 
     def list_tables(self) -> List[str]:
         self._require_open()
-        cursor = self._conn._conn.cursor()
+        inner = self._conn._conn
+        if isinstance(inner, _AdobConnection):
+            return inner.tables()
+        cursor = inner.cursor()
         return [
             row.table_name
             for row in cursor.tables()
@@ -41,15 +44,23 @@ class SchemaReader:
 
     def get_table_meta(self, table_name: str) -> TableMeta:
         self._require_open()
-        cursor = self._conn._conn.cursor()
-        columns = [
-            ColumnMeta(
-                name=col.column_name,
-                type_name=col.type_name,
-                nullable=bool(col.nullable),
-            )
-            for col in cursor.columns(table=table_name)
-        ]
+        inner = self._conn._conn
+        if isinstance(inner, _AdobConnection):
+            raw_cols = inner.columns(table_name)
+            columns = [
+                ColumnMeta(name=c["name"], type_name=c["type"], nullable=c["nullable"])
+                for c in raw_cols
+            ]
+        else:
+            cursor = inner.cursor()
+            columns = [
+                ColumnMeta(
+                    name=col.column_name,
+                    type_name=col.type_name,
+                    nullable=bool(col.nullable),
+                )
+                for col in cursor.columns(table=table_name)
+            ]
         rows, _ = self._conn.execute(f"SELECT COUNT(*) FROM [{table_name}]")
         row_count = rows[0][0] if rows else 0
         return TableMeta(name=table_name, columns=columns, row_count=row_count)

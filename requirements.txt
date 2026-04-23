@@ -1,6 +1,6 @@
 PyQt6>=6.6.0
 pyodbc>=5.0.0
-mdb-parser>=0.1.0
+pywin32>=306
 PyInstaller>=6.0.0
 
 # dev/test
