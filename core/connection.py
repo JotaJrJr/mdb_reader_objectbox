@@ -114,16 +114,17 @@ def _try_adodb(path: str, password: str = "") -> object:
     pwd_part = f"Jet OLEDB:Database Password={password};" if password else ""
     # Try ACE first, fall back to Jet 4.0
     for provider in ("Microsoft.ACE.OLEDB.12.0", "Microsoft.Jet.OLEDB.4.0"):
+        conn = _win32.Dispatch("ADODB.Connection")  # fresh object each attempt
         try:
             conn.ConnectionString = (
                 f"Provider={provider};Data Source={path};"
-                f"Persist Security Info=False;{pwd_part}"
+                f"Persist Security Info=False;User Id=Admin;Password=;{pwd_part}"
             )
             conn.Open()
             return conn
-        except Exception:
-            pass
-    raise RuntimeError("Neither ACE nor Jet OLEDB provider could open the file.")
+        except Exception as e:
+            last = e
+    raise RuntimeError(f"Neither ACE nor Jet OLEDB provider could open the file. Last error: {last}")
 
 
 class _AdobConnection:
