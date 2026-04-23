@@ -4,7 +4,7 @@ repos:
       - id: pytest
         name: pytest
         entry: pytest
-        args: ["-q", "--tb=short", "tests/"]
+        args: ["-q", "--tb=short", "-p", "no:cacheprovider", "tests/"]
         language: system
         pass_filenames: false
         always_run: true
