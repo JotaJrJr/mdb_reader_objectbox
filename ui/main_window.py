@@ -1,42 +1,16 @@
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
-    QSplitter, QLabel, QFileDialog, QFrame
+    QSplitter, QLabel, QFileDialog, QFrame, QPushButton
 )
-from PyQt6.QtCore import Qt, QUrl
+from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QDragEnterEvent, QDropEvent
 
 from core.connection import MDBConnection, MDBAccessError
+from core.diagnostics import Diagnostic, diagnose
 from core.schema import SchemaReader
-from core.diagnostics import diagnose
 from ui.sidebar import SidebarWidget
 from ui.editor import EditorWidget
 from ui.results import ResultsWidget
-
-
-class _DropArea(QLabel):
-    """Centered drop-target shown before any file is loaded."""
-
-    def __init__(self, on_file_dropped, parent=None):
-        super().__init__(parent)
-        self._callback = on_file_dropped
-        self.setText("Open or drop a .mdb file here")
-        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setStyleSheet(
-            "border: 2px dashed #9ca3af; border-radius: 8px; "
-            "color: #6b7280; font-size: 18px; background: #f9fafb;"
-        )
-        self.setAcceptDrops(True)
-
-    def dragEnterEvent(self, event: QDragEnterEvent):
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
-
-    def dropEvent(self, event: QDropEvent):
-        for url in event.mimeData().urls():
-            path = url.toLocalFile()
-            if path.lower().endswith(".mdb"):
-                self._callback(path)
-                return
 
 
 class MainWindow(QMainWindow):
@@ -46,6 +20,7 @@ class MainWindow(QMainWindow):
         self.resize(1200, 750)
         self._connection: MDBConnection | None = None
         self._setup_ui()
+        # Accept drops on the window itself — no child widget needed
         self.setAcceptDrops(True)
 
     def _setup_ui(self):
@@ -55,34 +30,10 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # Sidebar
+        # ── Sidebar ───────────────────────────────────────────────
         self.sidebar = SidebarWidget()
         self.sidebar.setFixedWidth(220)
         self.sidebar.table_selected.connect(self._on_table_selected)
-
-        # Right panel: drop area | editor + results
-        self._right_stack = QWidget()
-        right_layout = QVBoxLayout(self._right_stack)
-        right_layout.setContentsMargins(8, 8, 8, 8)
-
-        self._drop_area = _DropArea(self._load_file)
-        right_layout.addWidget(self._drop_area)
-
-        self._work_area = QWidget()
-        work_layout = QVBoxLayout(self._work_area)
-        work_layout.setContentsMargins(0, 0, 0, 0)
-
-        splitter = QSplitter(Qt.Orientation.Vertical)
-        self.editor = EditorWidget()
-        self.results = ResultsWidget()
-        splitter.addWidget(self.editor)
-        splitter.addWidget(self.results)
-        splitter.setSizes([200, 400])
-        work_layout.addWidget(splitter)
-
-        self._work_area.setVisible(False)
-        right_layout.addWidget(self._work_area)
-
         root.addWidget(self.sidebar)
 
         divider = QFrame()
@@ -90,11 +41,66 @@ class MainWindow(QMainWindow):
         divider.setStyleSheet("color: #e5e7eb;")
         root.addWidget(divider)
 
+        # ── Right panel (stacked: welcome screen OR work area) ────
+        self._right_stack = QWidget()
+        self._right_layout = QVBoxLayout(self._right_stack)
+        self._right_layout.setContentsMargins(0, 0, 0, 0)
         root.addWidget(self._right_stack, 1)
 
-        self.editor.execute_requested.connect(self._on_execute)
+        # Welcome / drop screen
+        self._welcome = self._build_welcome()
+        self._right_layout.addWidget(self._welcome)
 
+        # Work area (editor + results) — hidden until file loaded
+        self._work_area = QWidget()
+        work_layout = QVBoxLayout(self._work_area)
+        work_layout.setContentsMargins(8, 8, 8, 8)
+        splitter = QSplitter(Qt.Orientation.Vertical)
+        self.editor = EditorWidget()
+        self.results = ResultsWidget()
+        splitter.addWidget(self.editor)
+        splitter.addWidget(self.results)
+        splitter.setSizes([200, 400])
+        work_layout.addWidget(splitter)
+        self._work_area.setVisible(False)
+        self._right_layout.addWidget(self._work_area)
+
+        self.editor.execute_requested.connect(self._on_execute)
         self._setup_menu()
+
+    def _build_welcome(self) -> QWidget:
+        w = QWidget()
+        w.setStyleSheet("background: #f9fafb;")
+        layout = QVBoxLayout(w)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.setSpacing(20)
+
+        icon = QLabel("🗄")
+        icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon.setStyleSheet("font-size: 64px; background: transparent;")
+        layout.addWidget(icon)
+
+        label = QLabel("Drop a .mdb file here\nor click the button below")
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.setStyleSheet("font-size: 18px; color: #6b7280; background: transparent;")
+        layout.addWidget(label)
+
+        btn = QPushButton("Open .mdb file…")
+        btn.setFixedWidth(200)
+        btn.setFixedHeight(44)
+        btn.setStyleSheet(
+            "QPushButton { background: #2563eb; color: white; border-radius: 6px; font-size: 15px; }"
+            "QPushButton:hover { background: #1d4ed8; }"
+        )
+        btn.clicked.connect(self._open_file_dialog)
+        layout.addWidget(btn, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        hint = QLabel("Supports .mdb (Microsoft Access)")
+        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hint.setStyleSheet("font-size: 12px; color: #9ca3af; background: transparent;")
+        layout.addWidget(hint)
+
+        return w
 
     def _setup_menu(self):
         menu = self.menuBar()
@@ -116,23 +122,39 @@ class MainWindow(QMainWindow):
         self.sidebar.clear()
         self.results.clear()
 
+        # Show work area immediately — errors display there
+        self._welcome.setVisible(False)
+        self._work_area.setVisible(True)
+
         conn = MDBConnection(path)
         try:
             conn.open()
         except MDBAccessError as err:
-            diag = diagnose(err)
+            self.results.show_error(diagnose(err))
+            return
+        except Exception as err:
+            diag = Diagnostic(
+                title=f"Unexpected Error: {type(err).__name__}",
+                steps=[str(err), "Check that the file is a valid .mdb and is not corrupted."],
+                severity="error",
+            )
             self.results.show_error(diag)
-            self._drop_area.setVisible(True)
-            self._work_area.setVisible(False)
             return
 
         self._connection = conn
-        reader = SchemaReader(conn)
-        tables = reader.get_all_tables()
-        self.sidebar.load_tables(tables)
+        try:
+            reader = SchemaReader(conn)
+            tables = reader.get_all_tables()
+        except Exception as err:
+            diag = Diagnostic(
+                title="Failed to Read Schema",
+                steps=[str(err)],
+                severity="error",
+            )
+            self.results.show_error(diag)
+            return
 
-        self._drop_area.setVisible(False)
-        self._work_area.setVisible(True)
+        self.sidebar.load_tables(tables)
         self.setWindowTitle(f"MDB Reader — {path}")
 
     def _close_connection(self):
@@ -151,19 +173,30 @@ class MainWindow(QMainWindow):
             rows, columns = self._connection.execute(sql)
             self.results.show_results(columns, rows)
         except MDBAccessError as err:
-            diag = diagnose(err)
-            self.results.show_error(diag)
+            self.results.show_error(diagnose(err))
+
+    # ── Drag and drop on the main window ─────────────────────────
 
     def dragEnterEvent(self, event: QDragEnterEvent):
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
 
     def dropEvent(self, event: QDropEvent):
         for url in event.mimeData().urls():
             path = url.toLocalFile()
             if path.lower().endswith(".mdb"):
                 self._load_file(path)
+                event.acceptProposedAction()
                 return
+        event.ignore()
 
     def closeEvent(self, event):
         self._close_connection()

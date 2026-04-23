@@ -128,3 +128,4 @@ class TestMDBConnectionContextManager:
             with MDBConnection(sample_mdb_path) as conn:
                 raise ValueError("boom")
         mock_conn.close.assert_called_once()
+def test_fail(): assert False
