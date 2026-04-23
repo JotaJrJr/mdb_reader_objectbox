@@ -1,6 +1,6 @@
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
-    QSplitter, QLabel, QFileDialog, QFrame, QPushButton
+    QSplitter, QLabel, QFileDialog, QFrame, QPushButton, QInputDialog, QLineEdit
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QDragEnterEvent, QDropEvent
@@ -130,8 +130,24 @@ class MainWindow(QMainWindow):
         try:
             conn.open()
         except MDBAccessError as err:
-            self.results.show_error(diagnose(err))
-            return
+            if err.error_code == "PASSWORD_REQUIRED":
+                pwd, ok = QInputDialog.getText(
+                    self, "Password Required",
+                    "This file is password-protected.\nEnter the database password:",
+                    QLineEdit.EchoMode.Password,
+                )
+                if ok and pwd:
+                    try:
+                        conn.open(password=pwd)
+                    except MDBAccessError as err2:
+                        self.results.show_error(diagnose(err2))
+                        return
+                else:
+                    self.results.show_error(diagnose(err))
+                    return
+            else:
+                self.results.show_error(diagnose(err))
+                return
         except Exception as err:
             diag = Diagnostic(
                 title=f"Unexpected Error: {type(err).__name__}",

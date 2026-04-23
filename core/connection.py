@@ -11,23 +11,56 @@ class MDBAccessError(Exception):
 _DRIVER = "Microsoft Access Driver (*.mdb, *.accdb)"
 
 
+_PASSWORD_HINTS = (
+    "not a valid password",
+    "invalid password",
+    "password",
+    "-1507",
+)
+
+_WORKGROUP_HINTS = (
+    "(3029)",
+    "(3033)",
+    "do not have the necessary permissions",
+    "workgroup",
+)
+
+_LOCK_HINTS = (
+    "(3045)",
+    "already in use",
+    "file already in use",
+    "exclusive",
+)
+
+_CORRUPT_HINTS = (
+    "not a database",
+    "not recognize",
+    "corrupt",
+    "-1028",
+    "unrecognized database format",
+)
+
+
 def _classify_error(err: pyodbc.Error) -> MDBAccessError:
-    msg = str(err)
+    msg = str(err).lower()
+    raw = str(err)
     sqlstate = err.args[0] if err.args else ""
 
     if sqlstate == "IM014":
-        return MDBAccessError("BITNESS_MISMATCH", "32/64-bit driver mismatch. Match Python bitness to installed ACE driver.", err)
+        return MDBAccessError("BITNESS_MISMATCH", raw, err)
     if sqlstate == "IM002":
-        return MDBAccessError("DRIVER_MISSING", "Microsoft Access ODBC driver not found. Install Access Database Engine 2016.", err)
-    if "(3045)" in msg:
-        return MDBAccessError("FILE_LOCKED", "File is locked exclusively by another process. Close Microsoft Access.", err)
-    if "(3029)" in msg:
-        return MDBAccessError("WORKGROUP_SECURITY", "Workgroup security (.mdw) required. Contact the database administrator.", err)
-    if sqlstate == "28000":
-        return MDBAccessError("PASSWORD_REQUIRED", "File is password-protected. Re-open with correct password.", err)
-    if sqlstate in ("42000", "37000"):
-        return MDBAccessError("QUERY_ERROR", f"SQL error: {msg}", err)
-    return MDBAccessError("UNKNOWN", f"Unexpected error ({sqlstate}): {msg}", err)
+        return MDBAccessError("DRIVER_MISSING", raw, err)
+    if any(h in msg for h in _LOCK_HINTS):
+        return MDBAccessError("FILE_LOCKED", raw, err)
+    if any(h in msg for h in _WORKGROUP_HINTS):
+        return MDBAccessError("WORKGROUP_SECURITY", raw, err)
+    if sqlstate == "28000" or any(h in msg for h in _PASSWORD_HINTS):
+        return MDBAccessError("PASSWORD_REQUIRED", raw, err)
+    if any(h in msg for h in _CORRUPT_HINTS):
+        return MDBAccessError("FILE_CORRUPT", raw, err)
+    if sqlstate in ("42000", "37000") or "syntax error" in msg:
+        return MDBAccessError("QUERY_ERROR", raw, err)
+    return MDBAccessError("UNKNOWN", raw, err)
 
 
 class MDBConnection:
@@ -39,8 +72,11 @@ class MDBConnection:
     def is_open(self) -> bool:
         return self._conn is not None
 
-    def open(self) -> None:
-        conn_str = f"Driver={{{_DRIVER}}};DBQ={self.path};"
+    def open(self, password: str = "") -> None:
+        if password:
+            conn_str = f"Driver={{{_DRIVER}}};DBQ={self.path};PWD={password};"
+        else:
+            conn_str = f"Driver={{{_DRIVER}}};DBQ={self.path};"
         try:
             self._conn = pyodbc.connect(conn_str)
         except pyodbc.Error as err:

@@ -71,6 +71,16 @@ _DIAGNOSTICS = {
             "Access SQL does not support all standard SQL features (e.g., no FULL OUTER JOIN).",
         ],
     ),
+    "FILE_CORRUPT": Diagnostic(
+        title="File May Be Corrupted or Unrecognized Format",
+        severity="error",
+        steps=[
+            "The file could not be read as a valid .mdb database.",
+            "It may be corrupted, encrypted, or in an unsupported format.",
+            "Try opening it with Microsoft Access — if it fails there too, the file is damaged.",
+            "If the file opens in Access, compact it (Database Tools > Compact and Repair) then retry.",
+        ],
+    ),
     "UNKNOWN": Diagnostic(
         title="Unexpected Error",
         severity="error",
@@ -85,4 +95,13 @@ _DIAGNOSTICS = {
 
 
 def diagnose(error: MDBAccessError) -> Diagnostic:
-    return _DIAGNOSTICS.get(error.error_code, _DIAGNOSTICS["UNKNOWN"])
+    base = _DIAGNOSTICS.get(error.error_code, _DIAGNOSTICS["UNKNOWN"])
+    # Always append raw driver error so user can see exact message
+    raw = str(error).strip()
+    if raw and raw not in base.steps:
+        return Diagnostic(
+            title=base.title,
+            steps=list(base.steps) + [f"Driver detail: {raw}"],
+            severity=base.severity,
+        )
+    return base
