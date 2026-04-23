@@ -7,6 +7,29 @@ except ImportError:
     _ADODB_AVAILABLE = False
 
 
+def _ensure_odbc_registry() -> None:
+    """Create HKCU\\Software\\ODBC\\ODBC.INI if missing.
+
+    The ACE ODBC driver writes temporary DSN entries there.
+    If the key doesn't exist, every connection fails with
+    'Unable to open registry key Temporary (volatile) Ace DSN'.
+    """
+    try:
+        import winreg
+        key = winreg.CreateKeyEx(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\ODBC\ODBC.INI",
+            0,
+            winreg.KEY_ALL_ACCESS,
+        )
+        winreg.CloseKey(key)
+    except Exception:
+        pass  # Non-Windows or no registry access — fail gracefully
+
+
+_ensure_odbc_registry()
+
+
 class MDBAccessError(Exception):
     def __init__(self, error_code: str, message: str, original: Exception = None):
         super().__init__(message)
