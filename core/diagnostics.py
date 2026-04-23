@@ -71,6 +71,16 @@ _DIAGNOSTICS = {
             "Access SQL does not support all standard SQL features (e.g., no FULL OUTER JOIN).",
         ],
     ),
+    "REGISTRY_PERMISSION": Diagnostic(
+        title="Registry Permission Error — Run as Administrator",
+        severity="error",
+        steps=[
+            "The Access ODBC driver needs write access to the Windows registry (HKLM\\SOFTWARE\\ODBC).",
+            "Fix: right-click the app (or Python) and choose 'Run as Administrator'.",
+            "Alternative: grant your user write access to HKLM\\SOFTWARE\\ODBC\\ODBC.INI in regedit.",
+            "If the file is very old (pre-Access 97 / Jet 3.x), the ACE driver does not support it.",
+        ],
+    ),
     "FILE_CORRUPT": Diagnostic(
         title="File May Be Corrupted or Unrecognized Format",
         severity="error",

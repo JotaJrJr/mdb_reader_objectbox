@@ -32,6 +32,12 @@ _LOCK_HINTS = (
     "exclusive",
 )
 
+_REGISTRY_HINTS = (
+    "unable to open registry key",
+    "temporary (volatile) ace dsn",
+    "temporary (volatile)",
+)
+
 _CORRUPT_HINTS = (
     "not a database",
     "not recognize",
@@ -50,6 +56,8 @@ def _classify_error(err: pyodbc.Error) -> MDBAccessError:
         return MDBAccessError("BITNESS_MISMATCH", raw, err)
     if sqlstate == "IM002":
         return MDBAccessError("DRIVER_MISSING", raw, err)
+    if any(h in msg for h in _REGISTRY_HINTS):
+        return MDBAccessError("REGISTRY_PERMISSION", raw, err)
     if any(h in msg for h in _LOCK_HINTS):
         return MDBAccessError("FILE_LOCKED", raw, err)
     if any(h in msg for h in _WORKGROUP_HINTS):
