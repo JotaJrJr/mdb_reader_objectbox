@@ -1,16 +1,39 @@
+import os
+
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QSplitter, QLabel, QFileDialog, QFrame, QPushButton, QInputDialog, QLineEdit
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QDragEnterEvent, QDropEvent
 
 from core.connection import MDBConnection, MDBAccessError
+from core.custom_reader import (
+    CustomConnection, CustomSchemaReader, is_custom_format, load_ob_schema,
+)
 from core.diagnostics import Diagnostic, diagnose
 from core.schema import SchemaReader
 from ui.sidebar import SidebarWidget
 from ui.editor import EditorWidget
 from ui.results import ResultsWidget
+from ui.history import HistoryWidget
+
+
+class _QueryWorker(QThread):
+    finished = pyqtSignal(list, list)   # rows, columns
+    error = pyqtSignal(str)
+
+    def __init__(self, conn, sql: str):
+        super().__init__()
+        self._conn = conn
+        self._sql = sql
+
+    def run(self):
+        try:
+            rows, columns = self._conn.execute(self._sql)
+            self.finished.emit(rows, columns)
+        except Exception as e:
+            self.error.emit(str(e))
 
 
 class MainWindow(QMainWindow):
@@ -19,6 +42,9 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("MDB Reader")
         self.resize(1200, 750)
         self._connection: MDBConnection | None = None
+        self._custom_connection: CustomConnection | None = None
+        self._ob_schema: dict | None = None
+        self._worker: _QueryWorker | None = None
         self._setup_ui()
         # Accept drops on the window itself — no child widget needed
         self.setAcceptDrops(True)
@@ -51,17 +77,38 @@ class MainWindow(QMainWindow):
         self._welcome = self._build_welcome()
         self._right_layout.addWidget(self._welcome)
 
-        # Work area (editor + results) — hidden until file loaded
+        # Work area (editor + results + history) — hidden until file loaded
         self._work_area = QWidget()
         work_layout = QVBoxLayout(self._work_area)
-        work_layout.setContentsMargins(8, 8, 8, 8)
-        splitter = QSplitter(Qt.Orientation.Vertical)
+        work_layout.setContentsMargins(0, 0, 0, 0) # Remove margins, using splitter padding
+        
+        # Main horizontal splitter for work area
+        self._work_h_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._work_h_splitter.setHandleWidth(1)
+        self._work_h_splitter.setStyleSheet("QSplitter::handle { background: #e5e7eb; }")
+
+        # Left side: Vertical splitter for Editor and Results
+        left_pane = QWidget()
+        left_layout = QVBoxLayout(left_pane)
+        left_layout.setContentsMargins(8, 8, 8, 8)
+        
+        self._v_splitter = QSplitter(Qt.Orientation.Vertical)
         self.editor = EditorWidget()
         self.results = ResultsWidget()
-        splitter.addWidget(self.editor)
-        splitter.addWidget(self.results)
-        splitter.setSizes([200, 400])
-        work_layout.addWidget(splitter)
+        self._v_splitter.addWidget(self.editor)
+        self._v_splitter.addWidget(self.results)
+        self._v_splitter.setSizes([200, 400])
+        left_layout.addWidget(self._v_splitter)
+        
+        # Right side: History
+        self.history = HistoryWidget()
+        self.history.setFixedWidth(240)
+        self.history.query_selected.connect(self.editor.set_sql)
+
+        self._work_h_splitter.addWidget(left_pane)
+        self._work_h_splitter.addWidget(self.history)
+        
+        work_layout.addWidget(self._work_h_splitter)
         self._work_area.setVisible(False)
         self._right_layout.addWidget(self._work_area)
 
@@ -107,6 +154,9 @@ class MainWindow(QMainWindow):
         file_menu = menu.addMenu("File")
         open_action = file_menu.addAction("Open .mdb file…")
         open_action.triggered.connect(self._open_file_dialog)
+        self._schema_action = file_menu.addAction("Load ObjectBox schema…")
+        self._schema_action.triggered.connect(self._load_schema_dialog)
+        self._schema_action.setEnabled(False)
         file_menu.addSeparator()
         file_menu.addAction("Exit").triggered.connect(self.close)
 
@@ -126,7 +176,10 @@ class MainWindow(QMainWindow):
         self._welcome.setVisible(False)
         self._work_area.setVisible(True)
 
+        # ── Try standard Jet/ACE ODBC/ADODB path ─────────────────
         conn = MDBConnection(path)
+        standard_failed = False
+        _odbc_err = None
         try:
             conn.open()
         except MDBAccessError as err:
@@ -145,16 +198,36 @@ class MainWindow(QMainWindow):
                 else:
                     self.results.show_error(diagnose(err))
                     return
+            elif err.error_code in ("FILE_CORRUPT", "UNKNOWN", "REGISTRY_PERMISSION"):
+                # FILE_CORRUPT / UNKNOWN  → file is not a standard MDB.
+                # REGISTRY_PERMISSION     → ODBC is broken; the file might still be
+                #   a custom (ObjectBox) format.  Try that path before giving up.
+                standard_failed = True
+                _odbc_err = err
             else:
                 self.results.show_error(diagnose(err))
                 return
-        except Exception as err:
-            diag = Diagnostic(
-                title=f"Unexpected Error: {type(err).__name__}",
-                steps=[str(err), "Check that the file is a valid .mdb and is not corrupted."],
-                severity="error",
-            )
-            self.results.show_error(diag)
+        except Exception:
+            standard_failed = True
+
+        if standard_failed:
+            if is_custom_format(path):
+                schema = self._find_schema_near(path)
+                self._load_custom(path, schema=schema)
+            elif _odbc_err and _odbc_err.error_code == "REGISTRY_PERMISSION":
+                # Real Access file but ODBC registry is broken — show that specific error.
+                self.results.show_error(diagnose(_odbc_err))
+            else:
+                diag = Diagnostic(
+                    title="File May Be Corrupted or Unrecognised",
+                    steps=[
+                        "The file could not be opened by any Access driver.",
+                        "Verify the file is a valid .mdb database.",
+                        "If the file came from another application it may use a proprietary format.",
+                    ],
+                    severity="error",
+                )
+                self.results.show_error(diag)
             return
 
         self._connection = conn
@@ -173,23 +246,114 @@ class MainWindow(QMainWindow):
         self.sidebar.load_tables(tables)
         self.setWindowTitle(f"MDB Reader — {path}")
 
+    def _find_schema_near(self, path: str) -> dict | None:
+        """Look for objectbox-model.json in the same directory as path."""
+        candidate = os.path.join(os.path.dirname(os.path.abspath(path)), "objectbox-model.json")
+        if os.path.isfile(candidate):
+            return load_ob_schema(candidate)
+        return None
+
+    def _load_custom(self, path: str, schema: dict | None = None):
+        custom = CustomConnection(path, schema=schema)
+        try:
+            custom.open()
+        except Exception as err:
+            diag = Diagnostic(
+                title="Failed to Read Custom Format",
+                steps=[str(err)],
+                severity="error",
+            )
+            self.results.show_error(diag)
+            return
+
+        self._custom_connection = custom
+        self._ob_schema = schema
+        self._schema_action.setEnabled(True)
+        reader = CustomSchemaReader(custom)
+        tables = reader.get_all_tables()
+        self.sidebar.load_tables(tables)
+        schema_note = " [+schema]" if schema else ""
+        self.setWindowTitle(f"MDB Reader — {path} [custom format{schema_note}]")
+
+        if not schema:
+            diag = Diagnostic(
+                title="ObjectBox Schema Missing",
+                steps=[
+                    "The file was opened in custom mode, but no schema (objectbox-model.json) was found.",
+                    "Table names and some fields may be guessed or incomplete.",
+                    "Go to 'File > Load ObjectBox schema...' to provide the schema file from your Flutter project.",
+                ],
+                severity="warning",
+            )
+            self.results.show_error(diag)
+
+    def _load_schema_dialog(self):
+        """Let user point to an objectbox-model.json to re-parse the current file."""
+        if not (self._custom_connection and self._custom_connection.is_open):
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load ObjectBox Schema", "",
+            "ObjectBox Schema (objectbox-model.json);;All Files (*)",
+        )
+        if not path:
+            return
+        schema = load_ob_schema(path)
+        if schema is None:
+            diag = Diagnostic(
+                title="Invalid Schema File",
+                steps=["Could not parse the selected file as objectbox-model.json."],
+                severity="error",
+            )
+            self.results.show_error(diag)
+            return
+        self.results.show_loading()
+        self._load_custom(self._custom_connection.path, schema=schema)
+
     def _close_connection(self):
         if self._connection and self._connection.is_open:
             self._connection.close()
         self._connection = None
+        if self._custom_connection and self._custom_connection.is_open:
+            self._custom_connection.close()
+        self._custom_connection = None
 
     def _on_table_selected(self, table):
         sql = f"SELECT * FROM [{table.name}]"
         self.editor.set_sql(sql)
 
     def _on_execute(self, sql: str):
-        if not self._connection or not self._connection.is_open:
+        conn = self._custom_connection if (self._custom_connection and self._custom_connection.is_open) \
+               else self._connection if (self._connection and self._connection.is_open) \
+               else None
+        if conn is None:
             return
-        try:
-            rows, columns = self._connection.execute(sql)
-            self.results.show_results(columns, rows)
-        except MDBAccessError as err:
-            self.results.show_error(diagnose(err))
+
+        # Cancel previous worker if still running
+        if self._worker and self._worker.isRunning():
+            self._worker.quit()
+            self._worker.wait(500)
+
+        self.results.show_loading()
+        self.editor.setEnabled(False)
+        
+        # Add to history
+        self.history.add_entry(sql, "pending")
+
+        self._worker = _QueryWorker(conn, sql)
+        self._worker.finished.connect(self._on_query_done)
+        self._worker.error.connect(self._on_query_error)
+        self._worker.finished.connect(lambda *_: self.editor.setEnabled(True))
+        self._worker.error.connect(lambda *_: self.editor.setEnabled(True))
+        self._worker.start()
+
+    def _on_query_done(self, rows: list, columns: list):
+        self.results.show_results(columns, rows)
+        self.history.update_last_entry("success")
+
+    def _on_query_error(self, msg: str):
+        diag = Diagnostic(title="Query Error", steps=[msg], severity="error")
+        self.results.show_error(diag)
+        self.history.update_last_entry("error")
 
     # ── Drag and drop on the main window ─────────────────────────
 

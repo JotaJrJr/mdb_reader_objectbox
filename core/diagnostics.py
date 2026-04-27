@@ -72,13 +72,17 @@ _DIAGNOSTICS = {
         ],
     ),
     "REGISTRY_PERMISSION": Diagnostic(
-        title="Registry Permission Error — Run as Administrator",
+        title="ODBC Registry Key Error",
         severity="error",
         steps=[
-            "The Access ODBC driver needs write access to the Windows registry (HKLM\\SOFTWARE\\ODBC).",
-            "Fix: right-click the app (or Python) and choose 'Run as Administrator'.",
-            "Alternative: grant your user write access to HKLM\\SOFTWARE\\ODBC\\ODBC.INI in regedit.",
-            "If the file is very old (pre-Access 97 / Jet 3.x), the ACE driver does not support it.",
+            "All ODBC connection strategies failed, including the File-DSN bypass.",
+            "Most likely cause: the ACE driver itself is broken or mis-registered.",
+            "Fix: re-install Microsoft Access Database Engine 2016 matching your Python "
+            "bitness (run 'python -c \"import struct; print(struct.calcsize(chr(80))*8)\"' "
+            "to check — should be 32 or 64).",
+            "Download: https://www.microsoft.com/en-us/download/details.aspx?id=54920",
+            "If re-install is not possible: run the app once as Administrator to let it "
+            "seed the registry, then normal user rights will be sufficient.",
         ],
     ),
     "FILE_CORRUPT": Diagnostic(

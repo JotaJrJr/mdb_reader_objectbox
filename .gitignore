@@ -6,3 +6,19 @@ dist/
 build/
 *.egg-info/
 .env
+graphify-out/
+.claude/
+
+# Tests and coverage
+tests/
+pytest.ini
+.pytest_cache/
+
+# Data and Scripts
+data.mdb
+test_jet32.ps1
+debug_mdb.py
+
+# Documentation and Tooling
+CLAUDE.md
+.pre-commit-config.yaml

@@ -8,23 +8,60 @@ except ImportError:
 
 
 def _ensure_odbc_registry() -> None:
-    """Create HKCU\\Software\\ODBC\\ODBC.INI if missing.
+    """Ensure HKCU ODBC registry keys exist so the ACE ODBC driver can write
+    its temporary volatile DSN entries.
 
-    The ACE ODBC driver writes temporary DSN entries there.
-    If the key doesn't exist, every connection fails with
-    'Unable to open registry key Temporary (volatile) Ace DSN'.
+    Strategy 1 – winreg (three registry views: native, WOW64-64, WOW64-32).
+    Strategy 2 – reg.exe CLI fallback (most reliable; no elevation needed for HKCU).
     """
+    _HKCU_PATHS = [
+        r"HKCU\Software\ODBC",
+        r"HKCU\Software\ODBC\ODBC.INI",
+        r"HKCU\Software\ODBC\ODBC.INI\ODBC File DSN",
+    ]
+
+    # ── Strategy 1: winreg (fast, no subprocess) ─────────────────────────────
     try:
         import winreg
-        key = winreg.CreateKeyEx(
-            winreg.HKEY_CURRENT_USER,
-            r"Software\ODBC\ODBC.INI",
-            0,
+
+        _REL_PATHS = [p[len("HKCU\\"):] for p in _HKCU_PATHS]
+        # KEY_WOW64_64KEY = 0x0100, KEY_WOW64_32KEY = 0x0200
+        _VIEWS = [
             winreg.KEY_ALL_ACCESS,
-        )
-        winreg.CloseKey(key)
+            winreg.KEY_ALL_ACCESS | 0x0100,
+            winreg.KEY_ALL_ACCESS | 0x0200,
+        ]
+        for path in _REL_PATHS:
+            for flags in _VIEWS:
+                try:
+                    key = winreg.CreateKeyEx(
+                        winreg.HKEY_CURRENT_USER, path, 0, flags
+                    )
+                    # Verify write access — if volatile-child creation will
+                    # fail later, a dummy value write fails here too.
+                    try:
+                        winreg.SetValueEx(key, "_mdb_probe", 0, winreg.REG_SZ, "")
+                        winreg.DeleteValue(key, "_mdb_probe")
+                    except OSError:
+                        pass  # key exists but read-only — strategy 2 will fix it
+                    winreg.CloseKey(key)
+                except Exception:
+                    pass
     except Exception:
-        pass  # Non-Windows or no registry access — fail gracefully
+        pass
+
+    # ── Strategy 2: reg.exe CLI (handles ACL issues winreg cannot) ───────────
+    try:
+        import subprocess
+        for full_path in _HKCU_PATHS:
+            subprocess.run(
+                ["reg", "add", full_path, "/f"],
+                capture_output=True,
+                check=False,
+                timeout=5,
+            )
+    except Exception:
+        pass
 
 
 _ensure_odbc_registry()
@@ -104,6 +141,37 @@ def _classify_error(err: Exception) -> MDBAccessError:
 def _try_odbc(path: str, extra: str = "") -> object:
     conn_str = f"Driver={{{_DRIVER}}};DBQ={path};{extra}"
     return pyodbc.connect(conn_str)
+
+
+def _try_odbc_filedsn(path: str, password: str = "") -> object:
+    """Connect via a temporary File DSN (.dsn file).
+
+    The standard DSN-less Driver=...;DBQ=... connection string causes the
+    Windows ODBC Driver Manager to create a volatile registry key under
+    HKCU\\Software\\ODBC\\ODBC.INI.  Using a File DSN skips that step
+    entirely — the driver reads its config from the .dsn file instead.
+    """
+    import os
+    import tempfile
+
+    lines = [
+        "[ODBC]",
+        f"DRIVER={_DRIVER}",
+        f"DBQ={path}",
+    ]
+    if password:
+        lines.append(f"PWD={password}")
+
+    fd, dsn_path = tempfile.mkstemp(suffix=".dsn", prefix="mdb_reader_")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write("\n".join(lines) + "\n")
+        return pyodbc.connect(f"FILEDSN={dsn_path};")
+    finally:
+        try:
+            os.unlink(dsn_path)
+        except Exception:
+            pass
 
 
 def _try_adodb(path: str, password: str = "") -> object:
@@ -212,7 +280,11 @@ class MDBConnection:
     def open(self, password: str = "") -> None:
         last_err = None
 
-        # 1. Standard ODBC
+        # Re-run registry seeding immediately before ODBC attempts in case
+        # the module-level call ran too early or was blocked by a slow startup.
+        _ensure_odbc_registry()
+
+        # 1. Standard ODBC (DSN-less)
         try:
             extra = f"PWD={password};" if password else ""
             self._conn = _try_odbc(self.path, extra)
@@ -224,6 +296,18 @@ class MDBConnection:
             if classified.error_code not in ("FILE_CORRUPT", "UNKNOWN", "REGISTRY_PERMISSION"):
                 raise classified from e
             last_err = classified
+
+        # 1.5  File-DSN ODBC — bypasses volatile registry key creation entirely.
+        #      Triggered whenever strategy 1 hit a registry or corrupt/unknown error.
+        try:
+            self._conn = _try_odbc_filedsn(self.path, password)
+            self._backend = "odbc"
+            return
+        except pyodbc.Error as e:
+            c = _classify_error(e)
+            if c.error_code not in ("FILE_CORRUPT", "UNKNOWN", "REGISTRY_PERMISSION"):
+                raise c from e
+            # Keep the registry error as last_err; it's more informative than FILE_CORRUPT
 
         # 2. ODBC with default Jet admin credentials
         try:
