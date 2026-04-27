@@ -260,10 +260,10 @@ class ResultsWidget(QWidget):
         return self._table.rowCount()
 
     def column_count(self) -> int:
-        return self._table.columnCount()
+        return max(0, self._table.columnCount() - 1)  # exclude JSON copy column
 
     def header_at(self, col: int) -> str:
-        item = self._table.horizontalHeaderItem(col)
+        item = self._table.horizontalHeaderItem(col + 1)  # offset past JSON copy column
         return item.text() if item else ""
 
     def status_text(self) -> str:
